@@ -1870,6 +1870,85 @@ class DataFetcherManager:
                 return True
         return False
 
+    def _fetch_yfinance_fundamental(self, stock_code: str, market: str) -> Dict[str, Any]:
+        """Fetch fundamental data for US/HK stocks via YFinance."""
+        import time as _time
+        t0 = _time.monotonic()
+        try:
+            import yfinance as yf
+            ticker = yf.Ticker(stock_code)
+            info = ticker.info or {}
+            duration_ms = int((_time.monotonic() - t0) * 1000)
+            source_chain = [{"provider": "yfinance", "result": "ok", "duration_ms": duration_ms}]
+
+            valuation_data = {
+                "pe_ttm": info.get("trailingPE"),
+                "pe_forward": info.get("forwardPE"),
+                "pb": info.get("priceToBook"),
+                "ps": info.get("priceToSalesTrailing12Months"),
+                "market_cap": info.get("marketCap"),
+                "enterprise_value": info.get("enterpriseValue"),
+                "dividend_yield": info.get("dividendYield"),
+                "beta": info.get("beta"),
+            }
+
+            growth_data = {
+                "revenue_growth": info.get("revenueGrowth"),
+                "earnings_growth": info.get("earningsGrowth"),
+                "revenue_per_share": info.get("revenuePerShare"),
+            }
+
+            earnings_data = {
+                "profit_margins": info.get("profitMargins"),
+                "return_on_equity": info.get("returnOnEquity"),
+                "return_on_assets": info.get("returnOnAssets"),
+                "operating_margins": info.get("operatingMargins"),
+                "gross_margins": info.get("grossMargins"),
+                "ebitda": info.get("ebitda"),
+                "total_revenue": info.get("totalRevenue"),
+                "net_income": info.get("netIncomeToCommon"),
+            }
+
+            institution_data = {
+                "held_percent_insiders": info.get("heldPercentInsiders"),
+                "held_percent_institutions": info.get("heldPercentInstitutions"),
+                "short_ratio": info.get("shortRatio"),
+                "short_percent_of_float": info.get("shortPercentOfFloat"),
+            }
+
+            capital_flow_data = {
+                "total_cash": info.get("totalCash"),
+                "total_debt": info.get("totalDebt"),
+                "free_cashflow": info.get("freeCashflow"),
+                "operating_cashflow": info.get("operatingCashflow"),
+                "debt_to_equity": info.get("debtToEquity"),
+                "current_ratio": info.get("currentRatio"),
+            }
+
+            blocks = {
+                "valuation": self._build_fundamental_block("ok", valuation_data, source_chain),
+                "growth": self._build_fundamental_block("ok", growth_data, source_chain),
+                "earnings": self._build_fundamental_block("ok", earnings_data, source_chain),
+                "institution": self._build_fundamental_block("ok", institution_data, source_chain),
+                "capital_flow": self._build_fundamental_block("ok", capital_flow_data, source_chain),
+                "dragon_tiger": self._build_fundamental_block("not_supported", {}, source_chain, ["US/HK market"]),
+                "boards": self._build_fundamental_block("not_supported", {}, source_chain, ["US/HK market"]),
+            }
+
+            return {
+                "market": market,
+                "status": "ok",
+                "coverage": {k: v["status"] for k, v in blocks.items()},
+                "source_chain": source_chain,
+                "errors": [],
+                **blocks,
+                "belong_boards": [],
+            }
+
+        except Exception as e:
+            logger.warning(f"YFinance fundamental fetch failed for {stock_code}: {e}")
+            return self._build_market_not_supported(market=market, reason=f"yfinance error: {e}")
+
     def _build_market_not_supported(self, market: str, reason: str) -> Dict[str, Any]:
         blocks = {
             "valuation": self._build_fundamental_block(
@@ -1977,10 +2056,7 @@ class DataFetcherManager:
         market = _market_tag(stock_code)
         is_etf = _is_etf_code(stock_code)
         if market in {"us", "hk"}:
-            return self._build_market_not_supported(
-                market=market,
-                reason="market not supported",
-            )
+            return self._fetch_yfinance_fundamental(stock_code, market)
 
         stage_timeout = float(
             budget_seconds if budget_seconds is not None else config.fundamental_stage_timeout_seconds
