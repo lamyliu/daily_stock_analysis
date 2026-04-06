@@ -5,6 +5,8 @@ Claude CLI → OpenAI 兼容 API 适配器
 将 claude -p 包装为 OpenAI 格式的 HTTP API，让任何支持 OpenAI SDK 的项目
 直接使用 Claude 订阅，无需 API Key。
 
+支持：chat completions、streaming、function calling (tool use)
+
 启动: python scripts/claude-cli-adapter.py
 访问: http://127.0.0.1:8877/v1/chat/completions
 文档: http://127.0.0.1:8877/docs
@@ -14,13 +16,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import time
 import uuid
 import logging
-from typing import AsyncGenerator, Optional, List
+from typing import AsyncGenerator, Optional, List, Any, Dict
 
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel
 
 # ── Config ────────────────────────────────────────────────────────────────────
@@ -46,18 +49,73 @@ MODEL_ALIASES = {
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("claude-cli-adapter")
 
-# ── Models ────────────────────────────────────────────────────────────────────
+# ── Tool Use Support ─────────────────────────────────────────────────────────
 
-class Message(BaseModel):
-    role: str
-    content: str
+TOOL_USE_SYSTEM_SUFFIX = """
 
-class ChatRequest(BaseModel):
-    model: str = "claude-sonnet-4-5"
-    messages: List[Message]
-    temperature: Optional[float] = None
-    max_tokens: Optional[int] = None
-    stream: bool = False
+## Tool Use Protocol
+
+You have access to the following tools. When you need to call a tool, respond with ONLY a JSON object in this exact format (no other text before or after):
+
+{"tool_calls": [{"name": "function_name", "arguments": {"arg1": "value1"}}]}
+
+When you do NOT need to call a tool, respond normally with text content.
+
+CRITICAL RULES:
+- If you want to call tools, output ONLY the JSON object above, nothing else
+- You can call multiple tools at once by adding more items to the tool_calls array
+- After receiving tool results, synthesize a final answer for the user
+
+### Available Tools:
+"""
+
+def format_tools_for_prompt(tools: List[Dict]) -> str:
+    """Convert OpenAI tools format to prompt text."""
+    if not tools:
+        return ""
+    lines = [TOOL_USE_SYSTEM_SUFFIX]
+    for tool in tools:
+        if tool.get("type") == "function":
+            fn = tool["function"]
+            lines.append(f"\n**{fn['name']}**: {fn.get('description', '')}")
+            params = fn.get("parameters", {})
+            props = params.get("properties", {})
+            required = params.get("required", [])
+            if props:
+                lines.append("Parameters:")
+                for pname, pinfo in props.items():
+                    req = " (required)" if pname in required else ""
+                    lines.append(f"  - {pname}: {pinfo.get('type', 'string')} — {pinfo.get('description', '')}{req}")
+    return "\n".join(lines)
+
+def parse_tool_calls(content: str) -> Optional[List[Dict]]:
+    """Try to parse tool_calls from LLM response."""
+    content = content.strip()
+    # Try direct JSON parse
+    try:
+        data = json.loads(content)
+        if isinstance(data, dict) and "tool_calls" in data:
+            return data["tool_calls"]
+    except json.JSONDecodeError:
+        pass
+    # Try extracting from markdown fence
+    match = re.search(r'```(?:json)?\s*\n?([\s\S]*?)\n?```', content)
+    if match:
+        try:
+            data = json.loads(match.group(1).strip())
+            if isinstance(data, dict) and "tool_calls" in data:
+                return data["tool_calls"]
+        except json.JSONDecodeError:
+            pass
+    # Try finding JSON object with tool_calls
+    tc_match = re.search(r'\{"tool_calls":\s*\[[\s\S]*?\]\s*\}', content)
+    if tc_match:
+        try:
+            data = json.loads(tc_match.group(0))
+            return data.get("tool_calls")
+        except json.JSONDecodeError:
+            pass
+    return None
 
 # ── Core ──────────────────────────────────────────────────────────────────────
 
@@ -68,41 +126,68 @@ def resolve_model(model: str) -> str:
 
 JSON_ENFORCEMENT = "\n\nIMPORTANT: You MUST respond with raw JSON only. No markdown, no explanation, no code fences. Start your response with { and end with }. This is critical."
 
-def build_cli_args(messages: List[Message], model: str, stream: bool) -> tuple:
+def build_cli_args(messages: List[Dict], model: str, stream: bool,
+                   tools: Optional[List[Dict]] = None) -> tuple:
     """Build claude CLI args and stdin prompt."""
-    system = next((m.content for m in messages if m.role == "system"), None)
+    system = next((m["content"] for m in messages if m["role"] == "system"), None)
 
-    # Detect if caller expects JSON (system prompt mentions JSON format)
+    # Detect if caller expects JSON
     wants_json = system and ("json" in system.lower() or "JSON" in system)
+    has_tools = bool(tools)
 
+    # Build system prompt with tool definitions
+    effective_system = system or ""
+    if has_tools:
+        effective_system += format_tools_for_prompt(tools)
+    elif wants_json:
+        effective_system += JSON_ENFORCEMENT
+
+    # Build conversation from messages
     conversation = []
     for m in messages:
-        if m.role == "system":
+        if m["role"] == "system":
             continue
-        prefix = "Human" if m.role == "user" else "Assistant"
-        conversation.append(f"{prefix}: {m.content}")
+        elif m["role"] == "user":
+            conversation.append(f"Human: {m['content']}")
+        elif m["role"] == "assistant":
+            content = m.get("content", "")
+            # Handle assistant messages with tool_calls (re-serialize)
+            tool_calls = m.get("tool_calls")
+            if tool_calls and not content:
+                tc_json = json.dumps({"tool_calls": [
+                    {"name": tc["function"]["name"], "arguments": json.loads(tc["function"]["arguments"]) if isinstance(tc["function"]["arguments"], str) else tc["function"]["arguments"]}
+                    for tc in tool_calls
+                ]})
+                conversation.append(f"Assistant: {tc_json}")
+            elif content:
+                conversation.append(f"Assistant: {content}")
+        elif m["role"] == "tool":
+            # Tool result — format as Human message with tool context
+            tool_name = m.get("name", "tool")
+            conversation.append(f"Human: [Tool Result for {tool_name}]: {m['content']}")
+
     prompt = "\n\n".join(conversation)
 
     fmt = "stream-json" if stream else "json"
     cmd = ["claude", "-p", "--output-format", fmt, "--model", resolve_model(model),
-           "--disable-slash-commands", "--no-session-persistence", '--tools', '']
-    if system:
-        effective_system = system + (JSON_ENFORCEMENT if wants_json else "")
+           "--disable-slash-commands", "--no-session-persistence", "--tools", ""]
+    if effective_system:
         cmd.extend(["--system-prompt", effective_system])
 
     return cmd, prompt
 
-async def call_claude(messages: list[Message], model: str) -> dict:
+async def call_claude(messages: List[Dict], model: str,
+                      tools: Optional[List[Dict]] = None) -> dict:
     """Call claude -p and return parsed JSON result."""
-    cmd, prompt = build_cli_args(messages, model, stream=False)
-    log.info(f"calling: {' '.join(cmd[:6])}... ({len(prompt)} chars)")
+    cmd, prompt = build_cli_args(messages, model, stream=False, tools=tools)
+    log.info(f"calling: model={model}, tools={len(tools) if tools else 0}, prompt={len(prompt)} chars")
 
     proc = await asyncio.create_subprocess_exec(
         *cmd,
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
-        cwd="/tmp",  # Avoid loading project CLAUDE.md
+        cwd="/tmp",
     )
 
     try:
@@ -124,100 +209,78 @@ async def call_claude(messages: list[Message], model: str) -> dict:
     except json.JSONDecodeError:
         raw = stdout.decode()[:500]
         log.error(f"invalid JSON from claude: {raw}")
-        raise HTTPException(502, f"invalid JSON from claude CLI")
+        raise HTTPException(502, "invalid JSON from claude CLI")
 
     if result.get("is_error"):
         raise HTTPException(502, f"claude error: {result.get('result', 'unknown')}")
 
     return result
 
-async def stream_claude(messages: list[Message], model: str) -> AsyncGenerator[str, None]:
-    """Stream claude -p output as SSE chunks in OpenAI format."""
-    cmd, prompt = build_cli_args(messages, model, stream=True)
-    log.info(f"streaming: {' '.join(cmd[:6])}... ({len(prompt)} chars)")
-
-    proc = await asyncio.create_subprocess_exec(
-        *cmd,
-        stdin=asyncio.subprocess.PIPE,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        cwd="/tmp",  # Avoid loading project CLAUDE.md
-    )
-
-    proc.stdin.write(prompt.encode())
-    await proc.stdin.drain()
-    proc.stdin.close()
-
-    completion_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
-
-    async for line in proc.stdout:
-        text = line.decode().strip()
-        if not text:
-            continue
-        try:
-            event = json.loads(text)
-        except json.JSONDecodeError:
-            continue
-
-        # claude stream-json emits various event types
-        if event.get("type") == "assistant" and "content" in event:
-            chunk = {
-                "id": completion_id,
-                "object": "chat.completion.chunk",
-                "created": int(time.time()),
-                "model": model,
-                "choices": [{
-                    "index": 0,
-                    "delta": {"content": event["content"]},
-                    "finish_reason": None,
-                }],
-            }
-            yield f"data: {json.dumps(chunk)}\n\n"
-        elif event.get("type") == "result":
-            # Final event — send finish chunk
-            chunk = {
-                "id": completion_id,
-                "object": "chat.completion.chunk",
-                "created": int(time.time()),
-                "model": model,
-                "choices": [{
-                    "index": 0,
-                    "delta": {},
-                    "finish_reason": "stop",
-                }],
-            }
-            yield f"data: {json.dumps(chunk)}\n\n"
-
-    yield "data: [DONE]\n\n"
-    await proc.wait()
-
-import re
-
 def _clean_llm_content(text: str) -> str:
     """Clean LLM response: extract JSON from markdown fences if present."""
-    # Remove ```json ... ``` wrapping
     match = re.search(r'```(?:json)?\s*\n?([\s\S]*?)\n?```', text)
     if match:
         return match.group(1).strip()
-    # If text starts with { or [, it's already clean
     stripped = text.strip()
     if stripped.startswith('{') or stripped.startswith('['):
         return stripped
-    # Try to find JSON object in the text
     json_start = text.find('{')
     json_end = text.rfind('}')
     if json_start >= 0 and json_end > json_start:
         return text[json_start:json_end + 1]
     return text
 
-def to_openai_response(result: dict, model: str) -> dict:
+def to_openai_response(result: dict, model: str,
+                       has_tools: bool = False) -> dict:
     """Convert claude JSON result to OpenAI chat completion format."""
     usage = result.get("usage", {})
-    input_tokens = usage.get("input_tokens", 0) + usage.get("cache_creation_input_tokens", 0) + usage.get("cache_read_input_tokens", 0)
+    input_tokens = (usage.get("input_tokens", 0) +
+                    usage.get("cache_creation_input_tokens", 0) +
+                    usage.get("cache_read_input_tokens", 0))
     output_tokens = usage.get("output_tokens", 0)
 
-    content = _clean_llm_content(result.get("result", ""))
+    raw_content = result.get("result", "")
+    content = _clean_llm_content(raw_content)
 
+    # Check if response contains tool calls
+    tool_calls_data = parse_tool_calls(content) if has_tools else None
+
+    if tool_calls_data:
+        # Return as tool_calls response
+        openai_tool_calls = []
+        for i, tc in enumerate(tool_calls_data):
+            args = tc.get("arguments", {})
+            openai_tool_calls.append({
+                "id": f"call_{uuid.uuid4().hex[:8]}",
+                "type": "function",
+                "function": {
+                    "name": tc["name"],
+                    "arguments": json.dumps(args) if isinstance(args, dict) else str(args),
+                },
+            })
+        log.info(f"tool_calls detected: {[tc['name'] for tc in tool_calls_data]}")
+        return {
+            "id": f"chatcmpl-{uuid.uuid4().hex[:12]}",
+            "object": "chat.completion",
+            "created": int(time.time()),
+            "model": model,
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": openai_tool_calls,
+                },
+                "finish_reason": "tool_calls",
+            }],
+            "usage": {
+                "prompt_tokens": input_tokens,
+                "completion_tokens": output_tokens,
+                "total_tokens": input_tokens + output_tokens,
+            },
+        }
+
+    # Regular text response
     return {
         "id": f"chatcmpl-{uuid.uuid4().hex[:12]}",
         "object": "chat.completion",
@@ -240,11 +303,11 @@ def to_openai_response(result: dict, model: str) -> dict:
 
 # ── FastAPI ───────────────────────────────────────────────────────────────────
 
-app = FastAPI(title="Claude CLI Adapter", version="1.0.0")
+app = FastAPI(title="Claude CLI Adapter", version="2.0.0")
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "max_concurrent": MAX_CONCURRENT}
+    return {"status": "ok", "max_concurrent": MAX_CONCURRENT, "tool_use": True}
 
 @app.get("/v1/models")
 async def list_models():
@@ -257,29 +320,92 @@ async def list_models():
     }
 
 @app.post("/v1/chat/completions")
-async def chat_completions(req: ChatRequest):
+async def chat_completions(request: Request):
+    """Handle chat completions with optional tool use."""
+    body = await request.json()
+
+    model = body.get("model", "claude-sonnet-4-5")
+    messages = body.get("messages", [])
+    tools = body.get("tools")
+    stream = body.get("stream", False)
+
     async with semaphore:
-        if req.stream:
+        if stream and not tools:
+            # Streaming without tools (tool use doesn't support streaming)
+            msg_list = [Message(role=m["role"], content=m.get("content", "")) for m in messages]
             return StreamingResponse(
-                stream_claude(req.messages, req.model),
+                stream_claude_legacy(msg_list, model),
                 media_type="text/event-stream",
                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
             )
 
-        result = await call_claude(req.messages, req.model)
-        response = to_openai_response(result, req.model)
+        result = await call_claude(messages, model, tools=tools)
+        response = to_openai_response(result, model, has_tools=bool(tools))
 
         cost = result.get("total_cost_usd", 0)
         duration = result.get("duration_ms", 0)
-        log.info(f"done: {response['usage']['total_tokens']} tokens, ${cost:.4f}, {duration}ms")
+        tokens = response["usage"]["total_tokens"]
+        finish = response["choices"][0].get("finish_reason", "?")
+        log.info(f"done: {tokens} tokens, ${cost:.4f}, {duration}ms, finish={finish}")
 
-        return response
+        return JSONResponse(content=response)
+
+async def stream_claude_legacy(messages: List[Message], model: str) -> AsyncGenerator[str, None]:
+    """Stream claude -p output as SSE (legacy, no tool use)."""
+    msg_dicts = [{"role": m.role, "content": m.content} for m in messages]
+    cmd, prompt = build_cli_args(msg_dicts, model, stream=True)
+    log.info(f"streaming: model={model}, prompt={len(prompt)} chars")
+
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        cwd="/tmp",
+    )
+
+    proc.stdin.write(prompt.encode())
+    await proc.stdin.drain()
+    proc.stdin.close()
+
+    completion_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
+
+    async for line in proc.stdout:
+        text = line.decode().strip()
+        if not text:
+            continue
+        try:
+            event = json.loads(text)
+        except json.JSONDecodeError:
+            continue
+
+        if event.get("type") == "assistant" and "content" in event:
+            chunk = {
+                "id": completion_id,
+                "object": "chat.completion.chunk",
+                "created": int(time.time()),
+                "model": model,
+                "choices": [{"index": 0, "delta": {"content": event["content"]}, "finish_reason": None}],
+            }
+            yield f"data: {json.dumps(chunk)}\n\n"
+        elif event.get("type") == "result":
+            chunk = {
+                "id": completion_id,
+                "object": "chat.completion.chunk",
+                "created": int(time.time()),
+                "model": model,
+                "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+            }
+            yield f"data: {json.dumps(chunk)}\n\n"
+
+    yield "data: [DONE]\n\n"
+    await proc.wait()
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     import uvicorn
-    log.info(f"Claude CLI Adapter starting on http://{HOST}:{PORT}")
+    log.info(f"Claude CLI Adapter v2.0 starting on http://{HOST}:{PORT}")
     log.info(f"Models: {[m['id'] for m in AVAILABLE_MODELS]}")
-    log.info(f"Max concurrent: {MAX_CONCURRENT}")
+    log.info(f"Max concurrent: {MAX_CONCURRENT}, Tool use: enabled")
     uvicorn.run(app, host=HOST, port=PORT, log_level="warning")
