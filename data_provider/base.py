@@ -1881,6 +1881,13 @@ class DataFetcherManager:
             duration_ms = int((_time.monotonic() - t0) * 1000)
             source_chain = [{"provider": "yfinance", "result": "ok", "duration_ms": duration_ms}]
 
+            # Compute volume_ratio and turnover_rate
+            _vol = info.get("volume") or 0
+            _avg_vol = info.get("averageVolume10days") or info.get("averageVolume") or 0
+            _float_shares = info.get("floatShares") or info.get("sharesOutstanding") or 0
+            _volume_ratio = round(_vol / _avg_vol, 2) if _vol and _avg_vol else None
+            _turnover_rate = round(_vol / _float_shares * 100, 2) if _vol and _float_shares else None
+
             valuation_data = {
                 "pe_ttm": info.get("trailingPE"),
                 "pe_forward": info.get("forwardPE"),
@@ -1890,6 +1897,9 @@ class DataFetcherManager:
                 "enterprise_value": info.get("enterpriseValue"),
                 "dividend_yield": info.get("dividendYield"),
                 "beta": info.get("beta"),
+                "volume_ratio": _volume_ratio,
+                "turnover_rate": _turnover_rate,
+                "float_shares": _float_shares,
             }
 
             growth_data = {

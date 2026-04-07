@@ -1527,13 +1527,22 @@ class GeminiAnalyzer:
             _fc_earn = _fc.get('earnings', {}).get('data', {}) if isinstance(_fc, dict) else {}
             _roe = _fc_earn.get('return_on_equity')
             _roe_str = f"{_roe:.2%}" if isinstance(_roe, (int, float)) else 'N/A'
+            _vol_ratio = rt.get('volume_ratio') or _fc_val.get('volume_ratio') or 'N/A'
+            _turnover = rt.get('turnover_rate') or _fc_val.get('turnover_rate') or 'N/A'
+            _vol_desc = rt.get('volume_ratio_desc', '')
+            if _vol_desc == '' and isinstance(_vol_ratio, (int, float)):
+                if _vol_ratio > 2: _vol_desc = '显著放量'
+                elif _vol_ratio > 1.5: _vol_desc = '温和放量'
+                elif _vol_ratio < 0.5: _vol_desc = '显著缩量'
+                elif _vol_ratio < 0.8: _vol_desc = '温和缩量'
+                else: _vol_desc = '量能平稳'
             prompt += f"""
 ### 实时行情增强数据
 | 指标 | 数值 | 解读 |
 |------|------|------|
 | 当前价格 | {rt.get('price', 'N/A')} 元 | |
-| **量比** | **{rt.get('volume_ratio', 'N/A')}** | {rt.get('volume_ratio_desc', '')} |
-| **换手率** | **{rt.get('turnover_rate', 'N/A')}%** | |
+| **量比** | **{_vol_ratio}** | {_vol_desc} |
+| **换手率** | **{_turnover}%** | |
 | 市盈率(动态) | {_pe} | |
 | 市净率 | {_pb} | |
 | ROE | {_roe_str} | |
