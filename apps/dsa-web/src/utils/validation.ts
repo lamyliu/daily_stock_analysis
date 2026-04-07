@@ -14,6 +14,8 @@ const STOCK_CODE_PATTERNS = [
   /^HK\d{1,5}$/, // HK-prefixed code, for example HK00700
   /^\d{1,5}\.HK$/, // HK suffix format, for example 00700.HK
   /^[A-Z]{1,5}(?:\.(?:US|[A-Z]))?$/, // Common US ticker format
+  /^\d{4}\.T$/, // JP stock (Tokyo), for example 7203.T
+  /^\d{6}\.(KS|KQ)$/, // KR stock (KOSPI/KOSDAQ), for example 005930.KS
 ];
 
 /**
