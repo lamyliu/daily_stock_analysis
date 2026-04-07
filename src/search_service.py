@@ -2030,8 +2030,14 @@ class SearchService:
     
     @staticmethod
     def _is_foreign_stock(stock_code: str) -> bool:
-        """判断是否为港股或美股"""
-        code = stock_code.strip()
+        """判断是否为非 A 股（港股、美股、日股、韩股）"""
+        code = stock_code.strip().upper()
+        # 日股：7203.T
+        if code.endswith(".T") and code[:-2].isdigit():
+            return True
+        # 韩股：005930.KS, 247540.KQ
+        if (code.endswith(".KS") or code.endswith(".KQ")) and code.split(".")[0].isdigit():
+            return True
         # 美股：1-5个大写字母，可能包含点（如 BRK.B）
         if SearchService._US_STOCK_RE.match(code):
             return True

@@ -1522,11 +1522,12 @@ class DataFetcherManager:
         # 3. 依次尝试各个数据源
         from .akshare_fetcher import _is_us_code
         is_us = _is_us_code(stock_code)
-        _US_CAPABLE_FETCHERS = {"YfinanceFetcher", "LongbridgeFetcher"}
+        is_foreign = is_us or _is_jp_market(stock_code) or _is_kr_market(stock_code)
+        _FOREIGN_CAPABLE_FETCHERS = {"YfinanceFetcher", "LongbridgeFetcher"}
         for fetcher in self._get_fetchers_snapshot():
             if not hasattr(fetcher, 'get_stock_name'):
                 continue
-            if is_us and fetcher.name not in _US_CAPABLE_FETCHERS:
+            if is_foreign and fetcher.name not in _FOREIGN_CAPABLE_FETCHERS:
                 continue
             try:
                 name = self._call_fetcher_method(fetcher, 'get_stock_name', stock_code)

@@ -2,7 +2,7 @@
 """
 Market context detection for LLM prompts.
 
-Detects the market (A-shares, HK, US) from a stock code and returns
+Detects the market (A-shares, HK, US, JP, KR) from a stock code and returns
 market-specific role descriptions so prompts are not hardcoded to a
 single market.
 
@@ -17,12 +17,20 @@ def detect_market(stock_code: Optional[str]) -> str:
     """Detect market from stock code.
 
     Returns:
-        One of 'cn', 'hk', 'us', or 'cn' as fallback.
+        One of 'cn', 'hk', 'us', 'jp', 'kr', or 'cn' as fallback.
     """
     if not stock_code:
         return "cn"
 
     code = stock_code.strip().upper()
+
+    # JP stocks: 7203.T (Tokyo Stock Exchange)
+    if code.endswith(".T") and code[:-2].isdigit():
+        return "jp"
+
+    # KR stocks: 005930.KS (KOSPI), 247540.KQ (KOSDAQ)
+    if (code.endswith(".KS") or code.endswith(".KQ")) and code.split(".")[0].isdigit():
+        return "kr"
 
     # HK stocks: HK00700, 00700.HK, or 5-digit pure numbers
     if code.startswith("HK") or code.endswith(".HK"):
@@ -58,6 +66,14 @@ _MARKET_ROLES = {
         "zh": "美股",
         "en": "US stock",
     },
+    "jp": {
+        "zh": "日股",
+        "en": "Japanese stock",
+    },
+    "kr": {
+        "zh": "韩股",
+        "en": "Korean stock",
+    },
 }
 
 _MARKET_GUIDELINES = {
@@ -91,34 +107,38 @@ _MARKET_GUIDELINES = {
             "- US stocks have no daily price limits (but have circuit breakers), allow T+0 and pre/after-market trading. Consider USD FX, Fed policy, and SEC regulations."
         ),
     },
+    "jp": {
+        "zh": (
+            "- 本次分析对象为 **日股**（东京证券交易所上市股票）。\n"
+            "- 日股有涨跌停限制（根据股价区间不同），支持 T+3 结算，需关注日元汇率、日银政策及企业治理改革。"
+        ),
+        "en": (
+            "- This analysis covers a **Japanese stock** (listed on Tokyo Stock Exchange).\n"
+            "- Japanese stocks have price limit rules (varies by price range), T+3 settlement. Consider JPY FX, BOJ policy, and corporate governance reforms."
+        ),
+    },
+    "kr": {
+        "zh": (
+            "- 本次分析对象为 **韩股**（韩国交易所上市股票）。\n"
+            "- 韩股涨跌停限制为 ±30%，支持 T+2 结算，需关注韩元汇率、韩国央行政策及半导体产业周期。"
+        ),
+        "en": (
+            "- This analysis covers a **Korean stock** (listed on KRX).\n"
+            "- Korean stocks have ±30% daily price limits, T+2 settlement. Consider KRW FX, BOK policy, and semiconductor industry cycles."
+        ),
+    },
 }
 
 
 def get_market_role(stock_code: Optional[str], lang: str = "zh") -> str:
-    """Return market-specific role description for LLM prompt.
-
-    Args:
-        stock_code: The stock code being analyzed.
-        lang: 'zh' or 'en'.
-
-    Returns:
-        Role string like 'A 股投资分析' or 'US stock investment analysis'.
-    """
+    """Return market-specific role description for LLM prompt."""
     market = detect_market(stock_code)
     lang_key = "en" if lang == "en" else "zh"
     return _MARKET_ROLES.get(market, _MARKET_ROLES["cn"])[lang_key]
 
 
 def get_market_guidelines(stock_code: Optional[str], lang: str = "zh") -> str:
-    """Return market-specific analysis guidelines for LLM prompt.
-
-    Args:
-        stock_code: The stock code being analyzed.
-        lang: 'zh' or 'en'.
-
-    Returns:
-        Multi-line string with market-specific guidelines.
-    """
+    """Return market-specific analysis guidelines for LLM prompt."""
     market = detect_market(stock_code)
     lang_key = "en" if lang == "en" else "zh"
     return _MARKET_GUIDELINES.get(market, _MARKET_GUIDELINES["cn"])[lang_key]
