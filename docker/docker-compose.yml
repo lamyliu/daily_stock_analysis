@@ -28,6 +28,8 @@ x-common: &common
     - ../strategies:/app/strategies:ro
     - ../src:/app/src:ro
     - ../data_provider:/app/data_provider:ro
+    - ../apps:/app/apps:ro
+    - ../static/stocks.index.json:/app/static/stocks.index.json:ro
     # 如需覆盖前端静态资源，可挂载本地 static 目录
     # - ../static:/app/static:ro
 
