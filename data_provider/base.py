@@ -1932,7 +1932,7 @@ class DataFetcherManager:
             _turnover_rate = round(_vol / _float_shares * 100, 2) if _vol and _float_shares else None
 
             valuation_data = {
-                "pe_ttm": info.get("trailingPE"),
+                "pe_ttm": info.get("trailingPE") or info.get("forwardPE"),  # fallback to forward PE
                 "pe_forward": info.get("forwardPE"),
                 "pb": info.get("priceToBook"),
                 "ps": info.get("priceToSalesTrailing12Months"),
