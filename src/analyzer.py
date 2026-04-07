@@ -595,7 +595,7 @@ class GeminiAnalyzer:
                 "✅/⚠️/❌ 检查项3：量能配合",
                 "✅/⚠️/❌ 检查项4：无重大利空",
                 "✅/⚠️/❌ 检查项5：筹码健康",
-                "✅/⚠️/❌ 检查项6：PE估值合理"
+                "✅/⚠️/❌ 检查项6：四维度价值评分（ROE持续性+债务安全+FCF质量+PE估值，总分XX/100）"
             ]
         }
     },
@@ -1587,6 +1587,16 @@ class GeminiAnalyzer:
             _net_profit = financial_report.get('net_profit_parent') or (self._format_amount(_fc_earn.get('net_income')) if _fc_earn.get('net_income') else 'N/A')
             _op_cashflow = financial_report.get('operating_cash_flow') or (self._format_amount(_fc_cf.get('operating_cashflow')) if _fc_cf.get('operating_cashflow') else 'N/A')
             _fin_roe = financial_report.get('roe') or _roe_str
+            # Pre-compute four-dimension values for f-string
+            _v4_dte = _fc_cf.get('debt_to_equity', 'N/A') if _fc_cf else 'N/A'
+            _v4_cr = _fc_cf.get('current_ratio', 'N/A') if _fc_cf else 'N/A'
+            _v4_fcf = self._format_amount(_fc_cf.get('free_cashflow')) if _fc_cf and _fc_cf.get('free_cashflow') else 'N/A'
+            _v4_pe = _pe if 'realtime' in context else (_fc_val.get('pe_ttm', 'N/A') if _fc_val else 'N/A')
+            _v4_pb = _pb if 'realtime' in context else (_fc_val.get('pb', 'N/A') if _fc_val else 'N/A')
+            _gm = _fc_earn.get('gross_margins') if _fc_earn else None
+            _pm = _fc_earn.get('profit_margins') if _fc_earn else None
+            _v4_gm = f"{_gm:.1%}" if isinstance(_gm, (int, float)) else 'N/A'
+            _v4_pm = f"{_pm:.1%}" if isinstance(_pm, (int, float)) else 'N/A'
             prompt += f"""
 ### 财报与分红（价值投资口径）
 | 指标 | 数值 | 说明 |
@@ -1600,8 +1610,22 @@ class GeminiAnalyzer:
 | TTM 股息率 | {ttm_yield} | 公式：近12个月每股现金分红 / 当前价格 × 100% |
 | TTM 分红事件数 | {ttm_count} | |
 
-> 若上述字段为 N/A 或缺失，请明确写“数据缺失，无法判断”，禁止编造。
-"""
+### 四维度价值评估数据
+| 维度 | 指标 | 数值 |
+|------|------|------|
+| ROE持续性 | ROE | {_fin_roe} |
+| 债务安全 | 负债权益比 | {_v4_dte} |
+| 债务安全 | 流动比率 | {_v4_cr} |
+| 自由现金流 | FCF | {_v4_fcf} |
+| 自由现金流 | 经营现金流 | {_op_cashflow} |
+| PE估值 | PE(TTM) | {_v4_pe} |
+| PE估值 | PB | {_v4_pb} |
+| 利润率 | 毛利率 | {_v4_gm} |
+| 利润率 | 净利率 | {_v4_pm} |
+
+> 若上述字段为 N/A 或缺失，请明确写”数据缺失，无法判断”，禁止编造。
+> 请根据以上数据进行四维度评分（每维度0-25分），总分写入检查项6。
+“””
 
         # 添加筹码分布数据
         if 'chip' in context:

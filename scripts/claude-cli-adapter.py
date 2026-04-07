@@ -332,9 +332,8 @@ async def chat_completions(request: Request):
     async with semaphore:
         if stream and not tools:
             # Streaming without tools (tool use doesn't support streaming)
-            msg_list = [Message(role=m["role"], content=m.get("content", "")) for m in messages]
             return StreamingResponse(
-                stream_claude_legacy(msg_list, model),
+                stream_claude_legacy(messages, model),
                 media_type="text/event-stream",
                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
             )
@@ -350,10 +349,9 @@ async def chat_completions(request: Request):
 
         return JSONResponse(content=response)
 
-async def stream_claude_legacy(messages: List[Message], model: str) -> AsyncGenerator[str, None]:
+async def stream_claude_legacy(messages: List[Dict], model: str) -> AsyncGenerator[str, None]:
     """Stream claude -p output as SSE (legacy, no tool use)."""
-    msg_dicts = [{"role": m.role, "content": m.content} for m in messages]
-    cmd, prompt = build_cli_args(msg_dicts, model, stream=True)
+    cmd, prompt = build_cli_args(messages, model, stream=True)
     log.info(f"streaming: model={model}, prompt={len(prompt)} chars")
 
     proc = await asyncio.create_subprocess_exec(
