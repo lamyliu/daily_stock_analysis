@@ -105,12 +105,16 @@ def normalize_stock_code(stock_code: str) -> str:
             return candidate
 
     # Strip .SH/.SZ/.BJ suffix (e.g. 600519.SH -> 600519, 920748.BJ -> 920748)
+    # Keep JP/KR suffixes (.T, .KS, .KQ) — YFinance needs them
     if '.' in code:
         base, suffix = code.rsplit('.', 1)
-        if suffix.upper() == 'HK' and base.isdigit() and 1 <= len(base) <= 5:
+        su = suffix.upper()
+        if su == 'HK' and base.isdigit() and 1 <= len(base) <= 5:
             return f"HK{base.zfill(5)}"
-        if suffix.upper() in ('SH', 'SZ', 'SS', 'BJ') and base.isdigit():
+        if su in ('SH', 'SZ', 'SS', 'BJ') and base.isdigit():
             return base
+        if su in ('T', 'KS', 'KQ') and base.isdigit():
+            return f"{base}.{su}"  # Keep suffix for JP/KR
 
     return code
 
@@ -154,8 +158,25 @@ def _is_etf_code(code: str) -> bool:
     )
 
 
+def _is_jp_market(code: str) -> bool:
+    """判断是否为日股代码（如 7203.T, 9984.T）"""
+    normalized = (code or "").strip().upper()
+    return normalized.endswith(".T") and normalized[:-2].isdigit()
+
+
+def _is_kr_market(code: str) -> bool:
+    """判断是否为韩股代码（如 005930.KS, 000660.KQ）"""
+    normalized = (code or "").strip().upper()
+    return (normalized.endswith(".KS") or normalized.endswith(".KQ")) and normalized.split(".")[0].isdigit()
+
+
 def _market_tag(code: str) -> str:
-    """返回市场标签: cn/us/hk."""
+    """返回市场标签: cn/us/hk/jp/kr."""
+    # Check JP/KR first (suffix-based) before US (which matches broad patterns)
+    if _is_jp_market(code):
+        return "jp"
+    if _is_kr_market(code):
+        return "kr"
     if _is_us_market(code):
         return "us"
     if _is_hk_market(code):
@@ -944,6 +965,23 @@ class DataFetcherManager:
         is_us_index = is_us_index_code(stock_code)
         is_us = is_us_index or is_us_stock_code(stock_code)
         is_hk = (not is_us) and _is_hk_market(stock_code)
+        is_jp = _is_jp_market(stock_code)
+        is_kr = _is_kr_market(stock_code)
+
+        # 日韩股票走 YFinance 专用路由
+        if is_jp or is_kr:
+            market_label = "日股" if is_jp else "韩股"
+            for attempt, fetcher in enumerate(fetchers, start=1):
+                if fetcher.__class__.__name__ != "YfinanceFetcher":
+                    continue
+                try:
+                    df = fetcher.fetch_daily(stock_code, days=days)
+                    if df is not None and not df.empty:
+                        logger.info(f"[日线K线] {market_label} {stock_code} 成功获取 {len(df)} 条 (来源: YfinanceFetcher)")
+                        return df, "YfinanceFetcher"
+                except Exception as e:
+                    errors.append(f"YfinanceFetcher: {e}")
+            raise DataFetchError(f"{market_label} {stock_code} 数据获取失败: {'; '.join(errors)}")
 
         # 美股（含美股指数）使用 Longbridge/YFinance 特殊路由；港股走下方通用数据源循环
         if is_us:
@@ -1163,10 +1201,12 @@ class DataFetcherManager:
         #   美股指数:   始终 YFinance 首选（Longbridge 不提供指数行情）
         # ----------------------------------------------------------
         is_us_index = is_us_index_code(stock_code)
-        is_us = is_us_index or _is_us_code(stock_code)
-        is_hk = (not is_us) and _is_hk_market(stock_code)
+        is_jp = _is_jp_market(stock_code)
+        is_kr = _is_kr_market(stock_code)
+        is_us = (not is_jp and not is_kr) and (is_us_index or _is_us_code(stock_code))
+        is_hk = (not is_us and not is_jp and not is_kr) and _is_hk_market(stock_code)
 
-        if is_us or is_hk:
+        if is_us or is_hk or is_jp or is_kr:
             prefer_lb = self._longbridge_preferred() and not is_us_index
             if is_us:
                 primary_src = "LongbridgeFetcher" if prefer_lb else "YfinanceFetcher"
@@ -2065,7 +2105,7 @@ class DataFetcherManager:
         stock_code = normalize_stock_code(stock_code)
         market = _market_tag(stock_code)
         is_etf = _is_etf_code(stock_code)
-        if market in {"us", "hk"}:
+        if market in {"us", "hk", "jp", "kr"}:
             return self._fetch_yfinance_fundamental(stock_code, market)
 
         stage_timeout = float(

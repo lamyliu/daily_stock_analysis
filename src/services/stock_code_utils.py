@@ -23,6 +23,9 @@ _SUFFIX_DIGIT_LENS: dict = {
     ".SZ": (6,),
     ".SS": (6,),
     ".HK": (1, 2, 3, 4, 5),
+    ".T": (4,),      # Tokyo (e.g. 7203.T)
+    ".KS": (6,),     # Korea KOSPI (e.g. 005930.KS)
+    ".KQ": (6,),     # Korea KOSDAQ (e.g. 247540.KQ)
 }
 
 
@@ -37,11 +40,18 @@ def _strip_exchange_prefix(text: str) -> Optional[str]:
 
 
 def _strip_exchange_suffix(text: str) -> Optional[str]:
-    """Strip exchange suffix (.SH/.SZ/.SS/.HK) and return normalized bare digits, or None."""
+    """Strip exchange suffix and return normalized code, or None.
+
+    For JP/KR markets, returns the full code with suffix (YFinance needs it).
+    For CN/HK markets, returns bare digits.
+    """
     for suffix, digit_lens in _SUFFIX_DIGIT_LENS.items():
         if text.endswith(suffix):
             base = text[: -len(suffix)].strip()
             if base.isdigit() and len(base) in digit_lens:
+                # JP/KR: keep the suffix (YFinance needs 7203.T, 005930.KS)
+                if suffix in (".T", ".KS", ".KQ"):
+                    return text
                 return base.zfill(5) if suffix == ".HK" else base
     return None
 

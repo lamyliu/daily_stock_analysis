@@ -1516,17 +1516,19 @@ class GeminiAnalyzer:
 | 均线形态 | {context.get('ma_status', unknown_text)} | 多头/空头/缠绕 |
 """
         
+        # Fundamental context fallback (used by both realtime and financial sections)
+        _fc = context.get('fundamental_context', {}) if isinstance(context, dict) else {}
+        _fc_val = _fc.get('valuation', {}).get('data', {}) if isinstance(_fc, dict) else {}
+        _fc_earn = _fc.get('earnings', {}).get('data', {}) if isinstance(_fc, dict) else {}
+        _fc_cf = _fc.get('capital_flow', {}).get('data', {}) if isinstance(_fc, dict) else {}
+        _roe = _fc_earn.get('return_on_equity')
+        _roe_str = f"{_roe:.2%}" if isinstance(_roe, (int, float)) else 'N/A'
+
         # 添加实时行情数据（量比、换手率等）
         if 'realtime' in context:
             rt = context['realtime']
-            # Fallback PE/PB from fundamental_context (YFinance) if realtime doesn't have them
-            _fc = context.get('fundamental_context', {}) if isinstance(context, dict) else {}
-            _fc_val = _fc.get('valuation', {}).get('data', {}) if isinstance(_fc, dict) else {}
             _pe = rt.get('pe_ratio') or _fc_val.get('pe_ttm') or 'N/A'
             _pb = rt.get('pb_ratio') or _fc_val.get('pb') or 'N/A'
-            _fc_earn = _fc.get('earnings', {}).get('data', {}) if isinstance(_fc, dict) else {}
-            _roe = _fc_earn.get('return_on_equity')
-            _roe_str = f"{_roe:.2%}" if isinstance(_roe, (int, float)) else 'N/A'
             _vol_ratio = rt.get('volume_ratio') or _fc_val.get('volume_ratio') or 'N/A'
             _turnover = rt.get('turnover_rate') or _fc_val.get('turnover_rate') or 'N/A'
             _vol_desc = rt.get('volume_ratio_desc', '')
@@ -1580,13 +1582,11 @@ class GeminiAnalyzer:
             ttm_cash = dividend_metrics.get("ttm_cash_dividend_per_share", "N/A")
             ttm_count = dividend_metrics.get("ttm_event_count", "N/A")
             report_date = financial_report.get("report_date", "N/A")
-            # Fallback financial data from fundamental_context (YFinance for US/HK)
-            _fc_e = _fc_earn if '_fc_earn' in dir() else {}
-            _fc_cf = _fc.get('capital_flow', {}).get('data', {}) if isinstance(_fc, dict) else {}
-            _revenue = financial_report.get('revenue') or (self._format_amount(_fc_e.get('total_revenue')) if _fc_e.get('total_revenue') else 'N/A')
-            _net_profit = financial_report.get('net_profit_parent') or (self._format_amount(_fc_e.get('net_income')) if _fc_e.get('net_income') else 'N/A')
+            # Fallback financial data from fundamental_context (YFinance for US/HK/JP/KR)
+            _revenue = financial_report.get('revenue') or (self._format_amount(_fc_earn.get('total_revenue')) if _fc_earn.get('total_revenue') else 'N/A')
+            _net_profit = financial_report.get('net_profit_parent') or (self._format_amount(_fc_earn.get('net_income')) if _fc_earn.get('net_income') else 'N/A')
             _op_cashflow = financial_report.get('operating_cash_flow') or (self._format_amount(_fc_cf.get('operating_cashflow')) if _fc_cf.get('operating_cashflow') else 'N/A')
-            _fin_roe = financial_report.get('roe') or _roe_str if '_roe_str' in dir() else 'N/A'
+            _fin_roe = financial_report.get('roe') or _roe_str
             prompt += f"""
 ### 财报与分红（价值投资口径）
 | 指标 | 数值 | 说明 |
