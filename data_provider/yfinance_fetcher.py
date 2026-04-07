@@ -122,8 +122,8 @@ class YfinanceFetcher(BaseFetcher):
             logger.debug(f"转换港股代码: {stock_code} -> {hk_code}.HK")
             return f"{hk_code}.HK"
 
-        # 已经包含后缀的情况
-        if '.SS' in code or '.SZ' in code or '.HK' in code or '.BJ' in code:
+        # 已经包含后缀的情况（含日韩市场）
+        if any(s in code for s in ('.SS', '.SZ', '.HK', '.BJ', '.T', '.KS', '.KQ')):
             return code
 
         # 去除可能的 .SH 后缀
@@ -639,14 +639,17 @@ class YfinanceFetcher(BaseFetcher):
                 index_name=index_name,
             )
 
-        # 仅处理美股股票
-        if not self._is_us_stock(stock_code):
-            logger.debug(f"[Yfinance] {stock_code} 不是美股，跳过")
+        # 处理美股、日股、韩股
+        code_upper = stock_code.strip().upper()
+        is_jp_kr = code_upper.endswith(('.T', '.KS', '.KQ'))
+        if not self._is_us_stock(stock_code) and not is_jp_kr:
+            logger.debug(f"[Yfinance] {stock_code} 不是美股/日股/韩股，跳过")
             return None
 
         try:
-            symbol = stock_code.strip().upper()
-            logger.debug(f"[Yfinance] 获取美股 {symbol} 实时行情")
+            symbol = code_upper
+            market_label = "日股" if code_upper.endswith(".T") else "韩股" if code_upper.endswith((".KS", ".KQ")) else "美股"
+            logger.debug(f"[Yfinance] 获取{market_label} {symbol} 实时行情")
 
             ticker = yf.Ticker(symbol)
 

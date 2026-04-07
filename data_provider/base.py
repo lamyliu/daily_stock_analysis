@@ -971,11 +971,13 @@ class DataFetcherManager:
         # 日韩股票走 YFinance 专用路由
         if is_jp or is_kr:
             market_label = "日股" if is_jp else "韩股"
-            for attempt, fetcher in enumerate(fetchers, start=1):
+            for fetcher in fetchers:
                 if fetcher.__class__.__name__ != "YfinanceFetcher":
                     continue
                 try:
-                    df = fetcher.fetch_daily(stock_code, days=days)
+                    df = self._call_fetcher_method(
+                        fetcher, "get_daily_data", stock_code, days=days
+                    )
                     if df is not None and not df.empty:
                         logger.info(f"[日线K线] {market_label} {stock_code} 成功获取 {len(df)} 条 (来源: YfinanceFetcher)")
                         return df, "YfinanceFetcher"
