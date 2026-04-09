@@ -1552,8 +1552,6 @@ class DataFetcherManager:
         Keep this at manager layer to avoid changing BaseFetcher abstraction.
         """
         stock_code = normalize_stock_code(stock_code)
-        if _market_tag(stock_code) != "cn":
-            return []
         for fetcher in self._fetchers:
             if not hasattr(fetcher, "get_belong_board"):
                 continue

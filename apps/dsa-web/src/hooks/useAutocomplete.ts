@@ -78,6 +78,8 @@ export function useAutocomplete(
 
   // Use ref to store debounce timer
   const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Suppress next search after explicit close (e.g. item selection)
+  const suppressSearchRef = useRef(false);
 
   // Search function (debounced)
   const search = useCallback((q: string) => {
@@ -121,6 +123,12 @@ export function useAutocomplete(
       return;
     }
 
+    // Skip search if suppressed (after explicit selection/close)
+    if (suppressSearchRef.current) {
+      suppressSearchRef.current = false;
+      return;
+    }
+
     // Set new timer
     debounceTimerRef.current = setTimeout(() => {
       search(value);
@@ -155,6 +163,11 @@ export function useAutocomplete(
   const close = useCallback(() => {
     setIsOpen(false);
     setHighlightedIndex(-1);
+    suppressSearchRef.current = true;
+    if (debounceTimerRef.current) {
+      clearTimeout(debounceTimerRef.current);
+      debounceTimerRef.current = null;
+    }
   }, []);
 
   // Reset

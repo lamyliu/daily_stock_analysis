@@ -602,6 +602,7 @@ class AgentExecutor:
             max_steps=self.max_steps,
             progress_callback=progress_callback,
             max_wall_clock_seconds=self.timeout_seconds,
+            json_mode=parse_dashboard,
         )
 
         model_str = loop_result.model

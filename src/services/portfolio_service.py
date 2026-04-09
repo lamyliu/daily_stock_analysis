@@ -449,7 +449,13 @@ class PortfolioService:
             account_rows = self.repo.list_accounts(include_inactive=False)
 
         accounts_payload: List[Dict[str, Any]] = []
-        aggregate_currency = "CNY"
+        # Single-account view: use the account's own base currency (no FX conversion needed)
+        # Multi-account / all view: aggregate in CNY
+        aggregate_currency = (
+            account_rows[0].base_currency
+            if len(account_rows) == 1
+            else "CNY"
+        )
         aggregate = {
             "total_cash": 0.0,
             "total_market_value": 0.0,

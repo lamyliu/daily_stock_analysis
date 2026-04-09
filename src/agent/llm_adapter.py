@@ -253,6 +253,7 @@ class LLMToolAdapter:
         tools: List[dict],
         provider: Optional[str] = None,
         timeout: Optional[float] = None,
+        json_mode: bool = False,
     ) -> LLMResponse:
         """Send messages + tool declarations to LLM, return normalized response.
 
@@ -261,11 +262,13 @@ class LLMToolAdapter:
                       [{"role": "system"/"user"/"assistant"/"tool", "content": ...}, ...]
             tools: OpenAI-format tool declarations; litellm converts to each provider's format.
             provider: Ignored (kept for backward compatibility).
+            json_mode: When True, instruct the backend to return raw JSON only
+                       (maps to ``response_format={"type":"json_object"}``).
 
         Returns:
             LLMResponse with either content (final answer) or tool_calls.
         """
-        return self.call_completion(messages, tools=tools, provider=provider, timeout=timeout)
+        return self.call_completion(messages, tools=tools, provider=provider, timeout=timeout, json_mode=json_mode)
 
     def call_text(
         self,
@@ -295,6 +298,7 @@ class LLMToolAdapter:
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
         timeout: Optional[float] = None,
+        json_mode: bool = False,
     ) -> LLMResponse:
         """Shared completion path for both tool and text-only calls."""
         config = self._config
@@ -321,6 +325,7 @@ class LLMToolAdapter:
                     temperature=temperature,
                     max_tokens=max_tokens,
                     timeout=remaining_timeout,
+                    json_mode=json_mode,
                 )
             except litellm.RateLimitError as e:
                 logger.warning("Agent LLM rate-limited on %s: %s", model, e)
@@ -372,6 +377,7 @@ class LLMToolAdapter:
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
         timeout: Optional[float] = None,
+        json_mode: bool = False,
     ) -> LLMResponse:
         """Call a specific litellm model with OpenAI-format messages and tools."""
         openai_messages = self._convert_messages(messages)
@@ -388,6 +394,13 @@ class LLMToolAdapter:
             call_kwargs["max_tokens"] = max_tokens
         if timeout is not None:
             call_kwargs["timeout"] = timeout
+
+        # JSON mode: instruct backend to return raw JSON only (no markdown, no prose).
+        # Only applied when there are no tool declarations — tool-use responses are
+        # always JSON-structured by the protocol itself, and some providers reject
+        # response_format alongside tools.
+        if json_mode and not tools:
+            call_kwargs["response_format"] = {"type": "json_object"}
 
         extra = get_thinking_extra_body(model_short)
         if extra:

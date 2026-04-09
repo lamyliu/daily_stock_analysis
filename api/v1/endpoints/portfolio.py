@@ -431,6 +431,71 @@ def delete_corporate_action(action_id: int) -> PortfolioDeleteResponse:
 
 
 @router.get(
+    "/quotes",
+    summary="Batch realtime quotes for given symbols",
+)
+def batch_quotes(
+    symbols: str = Query(..., description="Comma-separated stock symbols, e.g. TSLA,PLTR,TSM"),
+):
+    """并发获取多支股票实时行情，用于前端异步更新持仓现价。"""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from data_provider.base import DataFetcherManager
+
+    symbol_list = [s.strip() for s in symbols.split(",") if s.strip()]
+    if not symbol_list:
+        return {"quotes": {}}
+
+    manager = DataFetcherManager()
+
+    def _fetch_one(sym: str):
+        try:
+            quote = manager.get_realtime_quote(sym, log_final_failure=False)
+            if quote and quote.price and quote.price > 0:
+                return sym, float(quote.price)
+        except Exception:
+            pass
+        return sym, None
+
+    result = {}
+    with ThreadPoolExecutor(max_workers=min(len(symbol_list), 8)) as executor:
+        futures = {executor.submit(_fetch_one, sym): sym for sym in symbol_list}
+        for future in as_completed(futures):
+            sym, price = future.result()
+            if price is not None:
+                result[sym] = price
+
+    # 将实时价持久化到 StockDaily，下次 snapshot 即可使用
+    if result:
+        try:
+            from datetime import date as date_cls
+            from src.storage import DatabaseManager, StockDaily
+            from sqlalchemy import select, and_
+
+            today = date_cls.today()
+            db = DatabaseManager.get_instance()
+            with db.get_session() as session:
+                for sym, price in result.items():
+                    row = session.execute(
+                        select(StockDaily).where(
+                            and_(StockDaily.code == sym, StockDaily.date == today)
+                        )
+                    ).scalar_one_or_none()
+                    if row:
+                        row.close = price
+                        row.data_source = "realtime"
+                    else:
+                        session.add(StockDaily(
+                            code=sym, date=today, close=price,
+                            data_source="realtime",
+                        ))
+                session.commit()
+        except Exception:
+            logger.debug("持久化实时价格失败", exc_info=True)
+
+    return {"quotes": result}
+
+
+@router.get(
     "/snapshot",
     response_model=PortfolioSnapshotResponse,
     responses={400: {"model": ErrorResponse}, 500: {"model": ErrorResponse}},

@@ -110,10 +110,12 @@ class YfinanceFetcher(BaseFetcher):
             logger.debug(f"识别为美股指数: {code} -> {yf_symbol}")
             return yf_symbol
 
-        # 美股：1-5 个大写字母（可选 .X 后缀），原样返回
+        # 美股：1-5 个大写字母（可选 .X 后缀）
+        # yfinance 用连字符作 share class 分隔符（BRK.B -> BRK-B）
         if is_us_stock_code(code):
-            logger.debug(f"识别为美股代码: {code}")
-            return code
+            yf_code = code.replace('.', '-') if '.' in code else code
+            logger.debug(f"识别为美股代码: {code} -> {yf_code}")
+            return yf_code
 
         # 港股：hk前缀 -> .HK后缀
         if code.startswith('HK'):
@@ -649,9 +651,14 @@ class YfinanceFetcher(BaseFetcher):
         try:
             symbol = code_upper
             market_label = "日股" if code_upper.endswith(".T") else "韩股" if code_upper.endswith((".KS", ".KQ")) else "美股"
-            logger.debug(f"[Yfinance] 获取{market_label} {symbol} 实时行情")
+            # yfinance 用连字符作 share class 分隔符（BRK.B -> BRK-B），
+            # 但日股/韩股后缀（.T/.KS/.KQ）必须保留
+            yf_sym = symbol
+            if not is_jp_kr and '.' in symbol:
+                yf_sym = symbol.replace('.', '-')
+            logger.debug(f"[Yfinance] 获取{market_label} {symbol} 实时行情 (yf={yf_sym})")
 
-            ticker = yf.Ticker(symbol)
+            ticker = yf.Ticker(yf_sym)
 
             # 尝试获取 fast_info（更快，但字段较少）
             try:
@@ -733,6 +740,46 @@ class YfinanceFetcher(BaseFetcher):
         except Exception as e:
             logger.warning(f"[Yfinance] 获取美股 {stock_code} 实时行情失败: {e}，尝试 Stooq 兜底")
             return self._get_us_stock_quote_from_stooq(stock_code)
+
+
+    def get_belong_board(self, stock_code: str) -> Optional[List[Dict[str, Any]]]:
+        """
+        获取股票所属行业板块（通过 yfinance Ticker.info）
+
+        yfinance 的 info 字典包含 sector 和 industry 字段，适用于美股、港股等国际市场。
+
+        Args:
+            stock_code: 股票代码，如 'TSLA', 'AAPL'
+
+        Returns:
+            板块列表，格式 [{"name": "...", "type": "..."}]，获取失败返回 None
+        """
+        import yfinance as yf
+
+        try:
+            yf_symbol = self._convert_stock_code(stock_code)
+            ticker = yf.Ticker(yf_symbol)
+            info = ticker.info or {}
+
+            boards: List[Dict[str, Any]] = []
+            industry = (info.get("industry") or "").strip()
+            sector = (info.get("sector") or "").strip()
+
+            if industry:
+                boards.append({"name": industry, "type": "industry"})
+            if sector and sector != industry:
+                boards.append({"name": sector, "type": "sector"})
+
+            if boards:
+                logger.info(f"[Yfinance] 获取 {stock_code} 行业板块成功: {boards}")
+                return boards
+
+            logger.debug(f"[Yfinance] {stock_code} 无行业信息")
+            return None
+
+        except Exception as e:
+            logger.warning(f"[Yfinance] 获取 {stock_code} 行业板块失败: {e}")
+            return None
 
 
 if __name__ == "__main__":

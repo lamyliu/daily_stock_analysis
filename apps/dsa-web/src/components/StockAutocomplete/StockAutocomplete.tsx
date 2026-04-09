@@ -141,12 +141,17 @@ function StockAutocompleteInner({
   };
 
   // Sync external value with internal query (only when value truly changes)
+  // Also re-trigger search when index finishes loading and value is non-empty
+  const prevLoadingRef = useRef(loading);
   useEffect(() => {
-    if (prevValueRef.current !== value) {
+    const indexJustLoaded = prevLoadingRef.current && !loading && index.length > 0;
+    prevLoadingRef.current = loading;
+
+    if (prevValueRef.current !== value || (indexJustLoaded && value)) {
       setQuery(value);
       prevValueRef.current = value;
     }
-  }, [value, setQuery]);
+  }, [value, setQuery, loading, index.length]);
 
   // Calculate suggestion box position (using fixed positioning)
   useEffect(() => {

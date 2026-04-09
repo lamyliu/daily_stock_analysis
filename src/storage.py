@@ -65,6 +65,22 @@ if TYPE_CHECKING:
 
 # === 数据模型定义 ===
 
+
+class StockSector(Base):
+    """股票行业分类缓存"""
+    __tablename__ = 'stock_sector'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    symbol = Column(String(20), nullable=False)
+    market = Column(String(10), nullable=False, default='')
+    sector = Column(String(100), nullable=False)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+    __table_args__ = (
+        UniqueConstraint('symbol', 'market', name='uix_stock_sector'),
+    )
+
+
 class StockDaily(Base):
     """
     股票日线数据模型

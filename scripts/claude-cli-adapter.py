@@ -38,12 +38,22 @@ AVAILABLE_MODELS = [
     {"id": "claude-sonnet-4-6", "owned_by": "anthropic"},
     {"id": "claude-opus-4-6", "owned_by": "anthropic"},
     {"id": "claude-haiku-4-5", "owned_by": "anthropic"},
+    # OpenAI-compatible names (mapped to Claude models)
+    {"id": "gpt-5.4", "owned_by": "openai"},
+    {"id": "gpt-5.4-mini", "owned_by": "openai"},
+    {"id": "gpt-4o", "owned_by": "openai"},
+    {"id": "gpt-4o-mini", "owned_by": "openai"},
 ]
 
 MODEL_ALIASES = {
     "sonnet": "claude-sonnet-4-6",
     "opus": "claude-opus-4-6",
     "haiku": "claude-haiku-4-5",
+    # OpenAI model names → Claude
+    "gpt-5.4": "claude-sonnet-4-6",
+    "gpt-5.4-mini": "claude-haiku-4-5",
+    "gpt-4o": "claude-sonnet-4-5",
+    "gpt-4o-mini": "claude-haiku-4-5",
 }
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -127,19 +137,24 @@ def resolve_model(model: str) -> str:
 JSON_ENFORCEMENT = "\n\nIMPORTANT: You MUST respond with raw JSON only. No markdown, no explanation, no code fences. Start your response with { and end with }. This is critical."
 
 def build_cli_args(messages: List[Dict], model: str, stream: bool,
-                   tools: Optional[List[Dict]] = None) -> tuple:
-    """Build claude CLI args and stdin prompt."""
-    system = next((m["content"] for m in messages if m["role"] == "system"), None)
+                   tools: Optional[List[Dict]] = None,
+                   json_mode: bool = False) -> tuple:
+    """Build claude CLI args and stdin prompt.
 
-    # Detect if caller expects JSON
-    wants_json = system and ("json" in system.lower() or "JSON" in system)
+    Args:
+        json_mode: When True, append a strict JSON-only enforcement suffix to the
+                   system prompt.  Callers should set this when ``response_format``
+                   is ``{"type": "json_object"}``.  When False the model is free to
+                   respond in plain text (chat / conversational mode).
+    """
+    system = next((m["content"] for m in messages if m["role"] == "system"), None)
     has_tools = bool(tools)
 
-    # Build system prompt with tool definitions
+    # Build system prompt with tool definitions or JSON enforcement
     effective_system = system or ""
     if has_tools:
         effective_system += format_tools_for_prompt(tools)
-    elif wants_json:
+    elif json_mode:
         effective_system += JSON_ENFORCEMENT
 
     # Build conversation from messages
@@ -166,20 +181,24 @@ def build_cli_args(messages: List[Dict], model: str, stream: bool,
             tool_name = m.get("name", "tool")
             conversation.append(f"Human: [Tool Result for {tool_name}]: {m['content']}")
 
-    prompt = "\n\n".join(conversation)
+    # Merge system prompt into stdin (avoids ARG_MAX limit for long prompts)
+    parts = []
+    if effective_system:
+        parts.append(f"[System Instructions]\n{effective_system}\n[End System Instructions]")
+    parts.extend(conversation)
+    prompt = "\n\n".join(parts)
 
     fmt = "stream-json" if stream else "json"
     cmd = ["claude", "-p", "--output-format", fmt, "--model", resolve_model(model),
            "--disable-slash-commands", "--no-session-persistence", "--tools", ""]
-    if effective_system:
-        cmd.extend(["--system-prompt", effective_system])
 
     return cmd, prompt
 
 async def call_claude(messages: List[Dict], model: str,
-                      tools: Optional[List[Dict]] = None) -> dict:
+                      tools: Optional[List[Dict]] = None,
+                      json_mode: bool = False) -> dict:
     """Call claude -p and return parsed JSON result."""
-    cmd, prompt = build_cli_args(messages, model, stream=False, tools=tools)
+    cmd, prompt = build_cli_args(messages, model, stream=False, tools=tools, json_mode=json_mode)
     log.info(f"calling: model={model}, tools={len(tools) if tools else 0}, prompt={len(prompt)} chars")
 
     proc = await asyncio.create_subprocess_exec(
@@ -199,16 +218,26 @@ async def call_claude(messages: List[Dict], model: str,
         proc.kill()
         raise HTTPException(504, f"claude CLI timed out after {TIMEOUT_SECONDS}s")
 
-    if proc.returncode != 0:
-        err = stderr.decode().strip()
-        log.error(f"claude CLI failed (rc={proc.returncode}): {err}")
-        raise HTTPException(502, f"claude CLI error: {err}")
+    out_raw = stdout.decode() if stdout else ""
+    err_raw = stderr.decode().strip() if stderr else ""
 
+    # Try to parse JSON even on non-zero exit (claude returns JSON with is_error)
+    result = None
     try:
-        result = json.loads(stdout.decode())
-    except json.JSONDecodeError:
-        raw = stdout.decode()[:500]
-        log.error(f"invalid JSON from claude: {raw}")
+        result = json.loads(out_raw)
+    except (json.JSONDecodeError, ValueError):
+        pass
+
+    if proc.returncode != 0:
+        if result and result.get("is_error"):
+            msg = result.get("result", "unknown error")
+            log.error(f"claude CLI error: {msg}")
+            raise HTTPException(502, f"claude error: {msg}")
+        log.error(f"claude CLI failed (rc={proc.returncode}): stderr={err_raw} stdout={out_raw[:300]}")
+        raise HTTPException(502, f"claude CLI error: {err_raw or out_raw[:300]}")
+
+    if result is None:
+        log.error(f"invalid JSON from claude: {out_raw[:500]}")
         raise HTTPException(502, "invalid JSON from claude CLI")
 
     if result.get("is_error"):
@@ -319,6 +348,40 @@ async def list_models():
         ],
     }
 
+@app.get("/api/tags")
+async def ollama_tags():
+    """Ollama-compatible model list."""
+    return {
+        "models": [
+            {"name": m["id"], "model": m["id"], "modified_at": "2026-01-01T00:00:00Z", "size": 0}
+            for m in AVAILABLE_MODELS
+        ]
+    }
+
+@app.post("/api/chat")
+async def ollama_chat(request: Request):
+    """Ollama-compatible chat endpoint."""
+    body = await request.json()
+    model = body.get("model", "claude-sonnet-4-6")
+    messages = body.get("messages", [])
+    tools = body.get("tools")
+
+    async with semaphore:
+        result = await call_claude(messages, model, tools=tools)
+        response = to_openai_response(result, model, has_tools=bool(tools))
+
+        choice = response["choices"][0]
+        ollama_resp = {
+            "model": model,
+            "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "message": choice["message"],
+            "done": True,
+            "total_duration": result.get("duration_ms", 0) * 1_000_000,
+            "eval_count": response["usage"]["completion_tokens"],
+            "prompt_eval_count": response["usage"]["prompt_tokens"],
+        }
+        return JSONResponse(content=ollama_resp)
+
 @app.post("/v1/chat/completions")
 async def chat_completions(request: Request):
     """Handle chat completions with optional tool use."""
@@ -328,17 +391,19 @@ async def chat_completions(request: Request):
     messages = body.get("messages", [])
     tools = body.get("tools")
     stream = body.get("stream", False)
+    response_format = body.get("response_format") or {}
+    json_mode = response_format.get("type") == "json_object"
 
     async with semaphore:
         if stream and not tools:
             # Streaming without tools (tool use doesn't support streaming)
             return StreamingResponse(
-                stream_claude_legacy(messages, model),
+                stream_claude_legacy(messages, model, json_mode=json_mode),
                 media_type="text/event-stream",
                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
             )
 
-        result = await call_claude(messages, model, tools=tools)
+        result = await call_claude(messages, model, tools=tools, json_mode=json_mode)
         response = to_openai_response(result, model, has_tools=bool(tools))
 
         cost = result.get("total_cost_usd", 0)
@@ -349,9 +414,9 @@ async def chat_completions(request: Request):
 
         return JSONResponse(content=response)
 
-async def stream_claude_legacy(messages: List[Dict], model: str) -> AsyncGenerator[str, None]:
+async def stream_claude_legacy(messages: List[Dict], model: str, json_mode: bool = False) -> AsyncGenerator[str, None]:
     """Stream claude -p output as SSE (legacy, no tool use)."""
-    cmd, prompt = build_cli_args(messages, model, stream=True)
+    cmd, prompt = build_cli_args(messages, model, stream=True, json_mode=json_mode)
     log.info(f"streaming: model={model}, prompt={len(prompt)} chars")
 
     proc = await asyncio.create_subprocess_exec(

@@ -367,6 +367,7 @@ def run_agent_loop(
     thinking_labels: Optional[Dict[str, str]] = None,
     max_wall_clock_seconds: Optional[float] = None,
     tool_call_timeout_seconds: Optional[float] = None,
+    json_mode: bool = False,
 ) -> RunLoopResult:
     """Execute the ReAct LLM ↔ tool loop.
 
@@ -465,6 +466,7 @@ def run_agent_loop(
             messages,
             tool_decls,
             timeout=remaining_timeout,
+            json_mode=json_mode,
         )
         provider_used = response.provider
         total_tokens += (response.usage or {}).get("total_tokens", 0)

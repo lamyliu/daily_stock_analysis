@@ -118,6 +118,15 @@ export const portfolioApi = {
     return toCamelCase<PortfolioAccountItem>(response.data);
   },
 
+  async batchQuotes(symbols: string[]): Promise<Record<string, number>> {
+    if (!symbols.length) return {};
+    const response = await apiClient.get<{ quotes: Record<string, number> }>('/api/v1/portfolio/quotes', {
+      params: { symbols: symbols.join(',') },
+      timeout: 120000,
+    });
+    return response.data.quotes;
+  },
+
   async getSnapshot(query: SnapshotQuery = {}): Promise<PortfolioSnapshotResponse> {
     const response = await apiClient.get<Record<string, unknown>>('/api/v1/portfolio/snapshot', {
       params: buildSnapshotParams(query),

@@ -37,6 +37,10 @@ from src.services.system_config_service import SystemConfigService
 @asynccontextmanager
 async def app_lifespan(app: FastAPI):
     """Initialize and release shared services for the app lifecycle."""
+    # 预初始化数据库，避免首批请求到达时 DB 尚未就绪
+    from src.storage import DatabaseManager
+    DatabaseManager.get_instance()
+
     app.state.system_config_service = SystemConfigService()
     try:
         yield

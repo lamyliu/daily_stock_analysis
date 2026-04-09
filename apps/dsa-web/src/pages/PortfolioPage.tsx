@@ -5,6 +5,7 @@ import { portfolioApi } from '../api/portfolio';
 import type { ParsedApiError } from '../api/error';
 import { getParsedApiError } from '../api/error';
 import { ApiErrorAlert, Card, Badge, ConfirmDialog, EmptyState, InlineAlert } from '../components/common';
+import { StockAutocomplete } from '../components/StockAutocomplete/StockAutocomplete';
 import { toDateInputValue } from '../utils/format';
 import type {
   PortfolioAccountItem,
@@ -169,10 +170,18 @@ const PortfolioPage: React.FC = () => {
     market: 'cn' as 'cn' | 'hk' | 'us',
     baseCurrency: 'CNY',
   });
-  const [costMethod, setCostMethod] = useState<PortfolioCostMethod>('fifo');
+  const [costMethod, setCostMethodRaw] = useState<PortfolioCostMethod>(() => {
+    const saved = typeof localStorage !== 'undefined' ? localStorage.getItem('dsa_portfolio_cost_method') : null;
+    return (saved === 'fifo' || saved === 'avg') ? saved : 'fifo';
+  });
+  const setCostMethod = useCallback((method: PortfolioCostMethod) => {
+    setCostMethodRaw(method);
+    try { localStorage.setItem('dsa_portfolio_cost_method', method); } catch {}
+  }, []);
   const [snapshot, setSnapshot] = useState<PortfolioSnapshotResponse | null>(null);
   const [risk, setRisk] = useState<PortfolioRiskResponse | null>(null);
   const [isLoading, setIsLoading] = useState(false);
+  const [quotesLoading, setQuotesLoading] = useState(false);
   const [fxRefreshing, setFxRefreshing] = useState(false);
   const [fxRefreshFeedback, setFxRefreshFeedback] = useState<FxRefreshFeedback | null>(null);
   const [error, setError] = useState<ParsedApiError | null>(null);
@@ -295,6 +304,35 @@ const PortfolioPage: React.FC = () => {
     }
   }, [selectedBroker]);
 
+  const applyRealtimePrices = useCallback((base: PortfolioSnapshotResponse, quotes: Record<string, number>): PortfolioSnapshotResponse => {
+    if (!Object.keys(quotes).length) return base;
+    let totalMV = 0;
+    let totalUnrealizedPnl = 0;
+    const accounts = base.accounts.map((acct) => {
+      let acctMV = 0;
+      let acctUnrealized = 0;
+      const positions = acct.positions.map((pos) => {
+        const rt = quotes[pos.symbol];
+        if (rt == null) {
+          acctMV += pos.marketValueBase;
+          acctUnrealized += pos.unrealizedPnlBase;
+          return pos;
+        }
+        const mv = pos.quantity * rt;
+        const pnl = mv - pos.totalCost;
+        acctMV += mv;
+        acctUnrealized += pnl;
+        return { ...pos, lastPrice: rt, marketValueBase: mv, unrealizedPnlBase: pnl };
+      });
+      const equity = acct.totalCash + acctMV;
+      totalMV += acctMV;
+      totalUnrealizedPnl += acctUnrealized;
+      return { ...acct, positions, totalMarketValue: acctMV, unrealizedPnl: acctUnrealized, totalEquity: equity };
+    });
+    const totalEquity = base.totalCash + totalMV;
+    return { ...base, accounts, totalMarketValue: totalMV, unrealizedPnl: totalUnrealizedPnl, totalEquity };
+  }, []);
+
   const loadSnapshotAndRisk = useCallback(async () => {
     setIsLoading(true);
     setRiskWarning(null);
@@ -305,6 +343,17 @@ const PortfolioPage: React.FC = () => {
       });
       setSnapshot(snapshotData);
       setError(null);
+
+      // 异步拉取实时行情，完成后覆盖价格
+      const allSymbols = snapshotData.accounts.flatMap((acct) => acct.positions.map((p) => p.symbol));
+      if (allSymbols.length > 0) {
+        setQuotesLoading(true);
+        portfolioApi.batchQuotes(allSymbols).then((quotes) => {
+          if (Object.keys(quotes).length > 0) {
+            setSnapshot((prev) => prev ? applyRealtimePrices(prev, quotes) : prev);
+          }
+        }).catch(() => { /* 实时行情失败不影响页面 */ }).finally(() => setQuotesLoading(false));
+      }
 
       try {
         const riskData = await portfolioApi.getRisk({
@@ -324,7 +373,7 @@ const PortfolioPage: React.FC = () => {
     } finally {
       setIsLoading(false);
     }
-  }, [queryAccountId, costMethod]);
+  }, [queryAccountId, costMethod, applyRealtimePrices]);
 
   const loadEventsPage = useCallback(async (page: number) => {
     setEventLoading(true);
@@ -438,11 +487,43 @@ const PortfolioPage: React.FC = () => {
   }, [snapshot]);
 
   const sectorPieData = useMemo(() => {
+    const SECTOR_ZH: Record<string, string> = {
+      'Aerospace & Defense': '航空航天与国防',
+      'Auto Manufacturers': '汽车制造',
+      'Electronic Gaming & Multimedia': '电子游戏与多媒体',
+      'Health Information Services': '医疗信息服务',
+      'Semiconductors': '半导体',
+      'Software - Infrastructure': '基础软件',
+      'Software - Application': '应用软件',
+      'Internet Content & Information': '互联网',
+      'Consumer Electronics': '消费电子',
+      'Biotechnology': '生物科技',
+      'Drug Manufacturers - General': '制药',
+      'Banks - Diversified': '综合银行',
+      'Insurance - Diversified': '综合保险',
+      'Oil & Gas Integrated': '油气综合',
+      'Communication Equipment': '通信设备',
+      'Information Technology Services': '信息技术服务',
+      'Diversified Industrials': '综合工业',
+      'Entertainment': '娱乐',
+      'Restaurants': '餐饮',
+      'Specialty Retail': '专业零售',
+      'Financial Data & Stock Exchanges': '金融数据与交易所',
+      'Asset Management': '资产管理',
+      'Credit Services': '信用服务',
+      'Packaged Foods': '食品加工',
+      'Household & Personal Products': '家居与个护',
+      'Medical Devices': '医疗器械',
+      'Telecom Services': '电信服务',
+      'Utilities - Regulated Electric': '电力公用事业',
+      'Real Estate Services': '房地产服务',
+      'Semiconductor Equipment & Materials': '半导体设备与材料',
+    };
     const sectors = risk?.sectorConcentration?.topSectors || [];
     return sectors
       .slice(0, 6)
       .map((item) => ({
-        name: item.sector,
+        name: SECTOR_ZH[item.sector] || item.sector,
         value: Number(item.weightPct || 0),
       }))
       .filter((item) => item.value > 0);
@@ -805,10 +886,10 @@ const PortfolioPage: React.FC = () => {
                 <button
                   type="button"
                   onClick={() => void handleRefresh()}
-                  disabled={isLoading || fxRefreshing}
+                  disabled={isLoading || quotesLoading || fxRefreshing}
                   className="btn-secondary text-sm flex-1"
                 >
-                  {isLoading ? '刷新中...' : '刷新数据'}
+                  {isLoading ? '加载中...' : quotesLoading ? '行情刷新中...' : '刷新数据'}
                 </button>
               </div>
             </div>
@@ -909,7 +990,7 @@ const PortfolioPage: React.FC = () => {
         </Card>
       ) : null}
 
-      <section className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-3">
+      <section className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-5 gap-3">
         <Card variant="gradient" padding="md">
           <p className="text-xs text-secondary">总权益</p>
           <p className="mt-1 text-xl font-semibold text-foreground">{formatMoney(snapshot?.totalEquity, snapshot?.currency || 'CNY')}</p>
@@ -917,6 +998,10 @@ const PortfolioPage: React.FC = () => {
         <Card variant="gradient" padding="md">
           <p className="text-xs text-secondary">总市值</p>
           <p className="mt-1 text-xl font-semibold text-foreground">{formatMoney(snapshot?.totalMarketValue, snapshot?.currency || 'CNY')}</p>
+        </Card>
+        <Card variant="gradient" padding="md">
+          <p className="text-xs text-secondary">总盈亏</p>
+          <p className={`mt-1 text-xl font-semibold ${(snapshot?.unrealizedPnl ?? 0) >= 0 ? 'text-success' : 'text-danger'}`}>{formatMoney(snapshot?.unrealizedPnl, snapshot?.currency || 'CNY')}</p>
         </Card>
         <Card variant="gradient" padding="md">
           <p className="text-xs text-secondary">总现金</p>
@@ -995,16 +1080,15 @@ const PortfolioPage: React.FC = () => {
         <Card padding="md">
           <h2 className="text-sm font-semibold text-foreground mb-3">{concentrationMode === 'sector' ? '行业集中度分布' : '行业数据暂不可用，当前展示个股集中度'}</h2>
           {concentrationPieData.length > 0 ? (
-            <div className="h-64">
+            <div className="h-80">
               <ResponsiveContainer width="100%" height="100%">
                 <PieChart>
-                  <Pie data={concentrationPieData} dataKey="value" nameKey="name" cx="50%" cy="50%" outerRadius={90}>
+                  <Pie data={concentrationPieData} dataKey="value" nameKey="name" cx="50%" cy="45%" outerRadius={80} label={({ name, value }) => `${name} ${Number(value).toFixed(1)}%`} labelLine={false}>
                     {concentrationPieData.map((entry, index) => (
                       <Cell key={`cell-${entry.name}`} fill={PIE_COLORS[index % PIE_COLORS.length]} />
                     ))}
                   </Pie>
                   <Tooltip formatter={(value) => `${Number(value).toFixed(2)}%`} />
-                  <Legend />
                 </PieChart>
               </ResponsiveContainer>
             </div>
@@ -1062,8 +1146,13 @@ const PortfolioPage: React.FC = () => {
         <Card padding="md">
           <h3 className="text-sm font-semibold text-foreground mb-3">手工录入：交易</h3>
           <form className="space-y-2" onSubmit={handleTradeSubmit}>
-            <input className={PORTFOLIO_INPUT_CLASS} placeholder="股票代码（例如 600519）" value={tradeForm.symbol}
-              onChange={(e) => setTradeForm((prev) => ({ ...prev, symbol: e.target.value }))} required />
+            <StockAutocomplete
+              value={tradeForm.symbol}
+              onChange={(v) => setTradeForm((prev) => ({ ...prev, symbol: v }))}
+              onSubmit={(code) => setTradeForm((prev) => ({ ...prev, symbol: code }))}
+              placeholder="股票代码或名称（例如 600519 / 茅台）"
+              className={PORTFOLIO_INPUT_CLASS}
+            />
             <div className="grid grid-cols-2 gap-2">
               <input className={PORTFOLIO_INPUT_CLASS} type="date" value={tradeForm.tradeDate}
                 onChange={(e) => setTradeForm((prev) => ({ ...prev, tradeDate: e.target.value }))} required />
@@ -1113,8 +1202,13 @@ const PortfolioPage: React.FC = () => {
         <Card padding="md">
           <h3 className="text-sm font-semibold text-foreground mb-3">手工录入：公司行为</h3>
           <form className="space-y-2" onSubmit={handleCorporateSubmit}>
-            <input className={PORTFOLIO_INPUT_CLASS} placeholder="股票代码" value={corpForm.symbol}
-              onChange={(e) => setCorpForm((prev) => ({ ...prev, symbol: e.target.value }))} required />
+            <StockAutocomplete
+              value={corpForm.symbol}
+              onChange={(v) => setCorpForm((prev) => ({ ...prev, symbol: v }))}
+              onSubmit={(code) => setCorpForm((prev) => ({ ...prev, symbol: code }))}
+              placeholder="股票代码或名称（例如 600519 / 茅台）"
+              className={PORTFOLIO_INPUT_CLASS}
+            />
             <div className="grid grid-cols-2 gap-2">
               <input className={PORTFOLIO_INPUT_CLASS} type="date" value={corpForm.effectiveDate}
                 onChange={(e) => setCorpForm((prev) => ({ ...prev, effectiveDate: e.target.value }))} required />

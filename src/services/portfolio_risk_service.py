@@ -282,10 +282,12 @@ class PortfolioRiskService:
         if cache_key in board_cache:
             return board_cache[cache_key]
 
-        if market != "cn":
-            coverage["unclassified_count"] += 1
-            board_cache[cache_key] = "UNCLASSIFIED"
-            return board_cache[cache_key]
+        # 先查 DB 缓存
+        db_sector = self._load_sector_from_db(symbol, market)
+        if db_sector:
+            coverage["classified_count"] += 1
+            board_cache[cache_key] = db_sector
+            return db_sector
 
         try:
             boards = self._fetch_belong_boards(symbol)
@@ -293,6 +295,7 @@ class PortfolioRiskService:
             if sector_name:
                 coverage["classified_count"] += 1
                 board_cache[cache_key] = sector_name
+                self._save_sector_to_db(symbol, market, sector_name)
                 return board_cache[cache_key]
         except Exception as exc:
             coverage["failed_count"] += 1
@@ -301,6 +304,42 @@ class PortfolioRiskService:
         coverage["unclassified_count"] += 1
         board_cache[cache_key] = "UNCLASSIFIED"
         return board_cache[cache_key]
+
+    @staticmethod
+    def _load_sector_from_db(symbol: str, market: str) -> Optional[str]:
+        try:
+            from src.storage import DatabaseManager, StockSector
+            from sqlalchemy import select, and_
+            db = DatabaseManager.get_instance()
+            with db.get_session() as session:
+                row = session.execute(
+                    select(StockSector).where(
+                        and_(StockSector.symbol == symbol, StockSector.market == market)
+                    )
+                ).scalar_one_or_none()
+                return row.sector if row else None
+        except Exception:
+            return None
+
+    @staticmethod
+    def _save_sector_to_db(symbol: str, market: str, sector: str) -> None:
+        try:
+            from src.storage import DatabaseManager, StockSector
+            from sqlalchemy import select, and_
+            db = DatabaseManager.get_instance()
+            with db.get_session() as session:
+                row = session.execute(
+                    select(StockSector).where(
+                        and_(StockSector.symbol == symbol, StockSector.market == market)
+                    )
+                ).scalar_one_or_none()
+                if row:
+                    row.sector = sector
+                else:
+                    session.add(StockSector(symbol=symbol, market=market, sector=sector))
+                session.commit()
+        except Exception:
+            pass
 
     def _fetch_belong_boards(self, symbol: str) -> List[Dict[str, Any]]:
         manager = self._get_data_manager()

@@ -39,7 +39,16 @@ const ChatPage: React.FC = () => {
   const [searchParams, setSearchParams] = useSearchParams();
   const [input, setInput] = useState('');
   const [skills, setSkills] = useState<SkillInfo[]>([]);
-  const [selectedSkill, setSelectedSkill] = useState<string>('');
+  const [selectedSkill, setSelectedSkillRaw] = useState<string>(() => {
+    if (typeof localStorage !== 'undefined') {
+      return localStorage.getItem('dsa_chat_selected_skill') ?? '';
+    }
+    return '';
+  });
+  const setSelectedSkill = useCallback((skill: string) => {
+    setSelectedSkillRaw(skill);
+    try { localStorage.setItem('dsa_chat_selected_skill', skill); } catch {}
+  }, []);
   const [showSkillDesc, setShowSkillDesc] = useState<string | null>(null);
   const [expandedThinking, setExpandedThinking] = useState<Set<string>>(new Set());
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
@@ -170,11 +179,19 @@ const ChatPage: React.FC = () => {
     agentApi.getSkills()
       .then((res) => {
         setSkills(res.skills);
-        const defaultId =
-          res.default_skill_id ||
-          res.skills[0]?.id ||
-          '';
-        setSelectedSkill(defaultId);
+        // Restore saved preference; fall back to API default
+        const saved = localStorage.getItem('dsa_chat_selected_skill');
+        const validIds = new Set(res.skills.map((s) => s.id));
+        if (saved !== null && (saved === '' || validIds.has(saved))) {
+          // Already set from useState initializer — no-op if unchanged
+          setSelectedSkill(saved);
+        } else {
+          const defaultId =
+            res.default_skill_id ||
+            res.skills[0]?.id ||
+            '';
+          setSelectedSkill(defaultId);
+        }
       })
       .catch((error) => {
         console.error('Failed to load chat skills:', error);
