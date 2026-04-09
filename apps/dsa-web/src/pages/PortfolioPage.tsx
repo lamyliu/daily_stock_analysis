@@ -1127,9 +1127,20 @@ const PortfolioPage: React.FC = () => {
         <Card padding="md">
           <h3 className="text-sm font-semibold text-foreground mb-2">止损接近预警</h3>
           <div className="text-xs text-secondary space-y-1">
-            <div>触发数: {risk?.stopLoss?.triggeredCount ?? 0}</div>
-            <div>接近数: {risk?.stopLoss?.nearCount ?? 0}</div>
-            <div>告警: {risk?.stopLoss?.nearAlert ? '是' : '否'}</div>
+            <div>触发数: {risk?.stopLoss?.triggeredCount ?? 0}　接近数: {risk?.stopLoss?.nearCount ?? 0}　告警: {risk?.stopLoss?.nearAlert ? '是' : '否'}</div>
+            {risk?.stopLoss?.items && risk.stopLoss.items.length > 0 && (
+              <div className="mt-2 border-t border-border pt-2 space-y-1">
+                {risk.stopLoss.items.map((item) => (
+                  <div key={`${item.accountId}-${item.symbol}`} className="flex items-center justify-between gap-2">
+                    <span className={`font-medium ${item.isTriggered ? 'text-red-400' : 'text-yellow-400'}`}>{item.symbol}</span>
+                    <span className="text-secondary">成本 {item.avgCost.toFixed(2)} → 现价 {item.lastPrice.toFixed(2)}</span>
+                    <span className={item.isTriggered ? 'text-red-400 font-semibold' : 'text-yellow-400'}>
+                      {(item.lossPct).toFixed(1)}%
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         </Card>
         <Card padding="md">
